@@ -1,0 +1,241 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/kuka/youbot/protos/Youbot.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/tables/protos/Table.proto"
+
+WorldInfo {
+}
+Viewpoint {
+  orientation -0.24482613330555253 -0.367634694087533 0.897164921379463 4.988689314203869
+  position -1.830297603098156 5.06500214792159 2.885822699704349
+}
+TexturedBackground {
+}
+Floor {
+}
+Solid {
+  translation -1.33 0.6 0
+  rotation 0 0 -1 1.5708
+  children [
+    Transform {
+      translation 0.21 0.14 0.36
+      rotation 0 0 1 3.14159
+      scale 0.001 0.001 0.0008
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Prusa_i3_MK3_Fusion.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "3d_printer_4(1)"
+}
+Solid {
+  translation -1.33 1.05 0
+  rotation 0 0 -1 1.5708
+  children [
+    Transform {
+      translation 0.21 0.14 0.36
+      rotation 0 0 1 3.14159
+      scale 0.001 0.001 0.0008
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Prusa_i3_MK3_Fusion.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "3d_printer_4(2)"
+}
+Solid {
+  translation -1.36 1.1 0
+  rotation 0 0 -1 1.5708
+  children [
+    Transform {
+      scale 0.01 0.015 0.006
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Storage_Rack_-_ULINE_-_H-2980_Wide_Span_Storage_Rack_-_Particle_Board_96_x_24_x_120_.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "shelves_2(1)"
+}
+Solid {
+  translation 2.06 0.59 0.002
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.1 0.7 0.2
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 1.2 1.1 0.004
+      }
+    }
+  ]
+  name "start_zone(1)"
+}
+Table {
+  translation 2.78 1.02 0
+  size 0.7 2 0.2
+}
+Solid {
+  translation 0.93 1.49 0
+  rotation 0 0 1 3.14159
+  children [
+    Transform {
+      translation 0.21 0.14 0.36
+      rotation 0 0 1 3.14159
+      scale 0.001 0.001 0.0008
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Prusa_i3_MK3_Fusion.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "3d_printer_4"
+}
+Solid {
+  translation 0.49 1.5 0
+  rotation 0 0 1 3.14159
+  children [
+    Transform {
+      translation 0.21 0.14 0.36
+      rotation 0 0 1 3.14159
+      scale 0.001 0.001 0.0008
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Prusa_i3_MK3_Fusion.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "3d_printer_3"
+}
+Solid {
+  translation 0.49 0 0
+  children [
+    Transform {
+      translation 0.21 0.14 0.36
+      rotation 0 0 1 3.14159
+      scale 0.001 0.001 0.0008
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Prusa_i3_MK3_Fusion.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "3d_printer_2"
+}
+Solid {
+  children [
+    Transform {
+      translation 0.21 0.14 0.36
+      rotation 0 0 1 3.14159
+      scale 0.001 0.001 0.0008
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Prusa_i3_MK3_Fusion.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "3d_printer_1"
+}
+Solid {
+  translation 0 1.1 0
+  children [
+    Transform {
+      scale 0.01 0.015 0.006
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Storage_Rack_-_ULINE_-_H-2980_Wide_Span_Storage_Rack_-_Particle_Board_96_x_24_x_120_.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "shelves_2"
+}
+Solid {
+  children [
+    Transform {
+      scale 0.01 0.015 0.006
+      children [
+        Shape {
+          geometry Mesh {
+            url [
+              "../meshes/Storage_Rack_-_ULINE_-_H-2980_Wide_Span_Storage_Rack_-_Particle_Board_96_x_24_x_120_.stl"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+  name "shelves_1"
+}
+Solid {
+  translation -2.85 -2 0.002
+  children [
+    Shape {
+      appearance PBRAppearance {
+        baseColor 0.1 0.7 0.2
+        roughness 1
+        metalness 0
+      }
+      geometry Box {
+        size 1.2 1.1 0.004
+      }
+    }
+  ]
+  name "start_zone"
+}
+Youbot {
+  translation -2.89579 -1.93673 0.14651
+  rotation -0.3186741650645812 0.9476248676306978 0.021304618473338567 0.006929281687917239
+  controllerArgs [
+    ""
+  ]
+  supervisor TRUE
+}
+TexturedBackgroundLight {
+}
