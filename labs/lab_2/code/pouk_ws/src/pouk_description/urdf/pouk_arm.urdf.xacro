@@ -1,0 +1,137 @@
+<?xml version="1.0"?>
+<!--
+  Учебный стенд ПОУК: пятизвенный манипулятор на приводах AX-12A + схват (ID 6).
+
+  Кинематика совпадает с приложением А к ЛР1 и модулем pouk_link.kinematics:
+    * нулевая конфигурация — вертикальная сборка (все приводы в положении 512);
+    * joint1 и joint5 вращаются вокруг вертикали / оси инструмента, joint2..joint4 — вокруг y;
+    * положительный угол joint2 наклоняет руку вперёд (+x), как в формулах ПЗК;
+    * tool0 — кончик схвата: при α2 + α3 + α4 = π он на l4 ниже оси joint4.
+  Пределы суставов — те же целые миллирадианы, что в прошивке (mcu_logic.cpp).
+
+  Геометрия звеньев — простые тела (параллелепипеды, цилиндры): для планирования
+  столкновений этого достаточно, а проверка столкновений примитивов на порядок дешевле сеток.
+  Длины l1..l4 ИЗМЕРЬТЕ на своём стенде (ЛР1, шаг 0) и при расхождении поправьте здесь
+  и в pouk_link/kinematics.py одновременно: модель одна.
+-->
+<robot name="pouk_arm" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- длины условных звеньев, м (приложение А) -->
+  <xacro:property name="l1" value="0.103"/>    <!-- ось joint2 над плоскостью крепления -->
+  <xacro:property name="l2" value="0.1045"/>   <!-- joint2 -> joint3 -->
+  <xacro:property name="l3" value="0.079"/>    <!-- joint3 -> joint4 -->
+  <xacro:property name="l4" value="0.169"/>    <!-- joint4 -> кончик схвата -->
+  <xacro:property name="h1" value="0.045"/>    <!-- верх поворотного основания (joint1) -->
+  <xacro:property name="d5" value="0.047"/>    <!-- joint4 -> ось вращения схвата (joint5) -->
+
+  <!-- характеристики AX-12A: момент удержания 1,5 Н·м; скорость — предел модели планирования -->
+  <xacro:property name="effort" value="1.5"/>
+  <xacro:property name="velocity" value="1.5"/>
+
+  <material name="servo"><color rgba="0.12 0.12 0.12 1.0"/></material>
+  <material name="bracket"><color rgba="0.78 0.78 0.80 1.0"/></material>
+  <material name="plate"><color rgba="0.25 0.45 0.30 1.0"/></material>
+  <material name="jaw"><color rgba="0.85 0.45 0.10 1.0"/></material>
+
+  <!-- тело: одинаковые визуальная и столкновительная формы -->
+  <xacro:macro name="box_body" params="size xyz material">
+    <visual>
+      <origin xyz="${xyz}" rpy="0 0 0"/>
+      <geometry><box size="${size}"/></geometry>
+      <material name="${material}"/>
+    </visual>
+    <collision>
+      <origin xyz="${xyz}" rpy="0 0 0"/>
+      <geometry><box size="${size}"/></geometry>
+    </collision>
+  </xacro:macro>
+
+  <xacro:macro name="arm_joint" params="name type parent child xyz axis lower upper">
+    <joint name="${name}" type="${type}">
+      <parent link="${parent}"/>
+      <child link="${child}"/>
+      <origin xyz="${xyz}" rpy="0 0 0"/>
+      <axis xyz="${axis}"/>
+      <limit lower="${lower}" upper="${upper}" effort="${effort}" velocity="${velocity}"/>
+    </joint>
+  </xacro:macro>
+
+  <!-- ============================================================ основание -->
+  <link name="base_link">
+    <xacro:box_body size="0.20 0.20 0.008" xyz="0 0 -0.004" material="plate"/>
+    <!-- привод ID 1 стоит вертикально, выходной вал вверх -->
+    <xacro:box_body size="0.040 0.032 0.050" xyz="0 0 0.020" material="servo"/>
+  </link>
+
+  <xacro:arm_joint name="joint1" type="revolute" parent="base_link" child="link1"
+                   xyz="0 0 ${h1}" axis="0 0 1" lower="-1.790" upper="1.790"/>
+
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.003" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.030" length="0.006"/></geometry>
+      <material name="bracket"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.003" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.030" length="0.006"/></geometry>
+    </collision>
+    <!-- привод ID 2, ось горизонтальна -->
+    <xacro:box_body size="0.032 0.050 0.040" xyz="0 0 ${l1 - h1 - 0.018}" material="servo"/>
+  </link>
+
+  <xacro:arm_joint name="joint2" type="revolute" parent="link1" child="link2"
+                   xyz="0 0 ${l1 - h1}" axis="0 1 0" lower="-1.278" upper="1.278"/>
+
+  <!-- ============================================================ плечо -->
+  <link name="link2">
+    <xacro:box_body size="0.024 0.040 0.066" xyz="0 0 0.052" material="bracket"/>
+    <!-- привод ID 3 у оси joint3 -->
+    <xacro:box_body size="0.032 0.050 0.036" xyz="0 0 ${l2 - 0.006}" material="servo"/>
+  </link>
+
+  <xacro:arm_joint name="joint3" type="revolute" parent="link2" child="link3"
+                   xyz="0 0 ${l2}" axis="0 1 0" lower="-1.278" upper="1.943"/>
+
+  <!-- ============================================================ предплечье -->
+  <link name="link3">
+    <xacro:box_body size="0.024 0.040 0.034" xyz="0 0 0.036" material="bracket"/>
+    <!-- привод ID 4 у оси joint4 -->
+    <xacro:box_body size="0.032 0.050 0.034" xyz="0 0 ${l3 - 0.006}" material="servo"/>
+  </link>
+
+  <xacro:arm_joint name="joint4" type="revolute" parent="link3" child="link4"
+                   xyz="0 0 ${l3}" axis="0 1 0" lower="-0.767" upper="1.943"/>
+
+  <!-- ============================================================ кисть -->
+  <link name="link4">
+    <!-- привод ID 5, ось вдоль инструмента -->
+    <xacro:box_body size="0.032 0.040 0.030" xyz="0 0 0.030" material="servo"/>
+  </link>
+
+  <xacro:arm_joint name="joint5" type="revolute" parent="link4" child="link5"
+                   xyz="0 0 ${d5}" axis="0 0 1" lower="-1.790" upper="1.790"/>
+
+  <link name="link5">
+    <!-- привод схвата ID 6 и неподвижная губка -->
+    <xacro:box_body size="0.050 0.032 0.036" xyz="0.004 0 0.028" material="servo"/>
+    <xacro:box_body size="0.008 0.024 0.060" xyz="0.014 0 ${l4 - d5 - 0.030}" material="jaw"/>
+  </link>
+
+  <xacro:arm_joint name="gripper_joint" type="revolute" parent="link5" child="gripper_link"
+                   xyz="-0.004 0 0.060" axis="0 1 0" lower="-1.023" upper="1.023"/>
+
+  <link name="gripper_link">
+    <!-- подвижная губка -->
+    <xacro:box_body size="0.008 0.024 0.058" xyz="-0.010 0 ${l4 - d5 - 0.060 - 0.029}" material="jaw"/>
+  </link>
+
+  <!-- кончик схвата: целевая точка ОЗК и MoveIt -->
+  <joint name="tool0_joint" type="fixed">
+    <parent link="link5"/>
+    <child link="tool0"/>
+    <origin xyz="0 0 ${l4 - d5}" rpy="0 0 0"/>
+  </joint>
+  <link name="tool0"/>
+
+</robot>

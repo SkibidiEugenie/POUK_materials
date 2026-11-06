@@ -1,0 +1,606 @@
+#include <Dynamixel2Arduino.h>
+
+// =====================================================
+//                  ПОДКЛЮЧЕНИЕ DYNAMIXEL
+// =====================================================
+#define DXL_SERIAL   Serial3
+#define DEBUG_SERIAL Serial
+
+const uint8_t DXL_DIR_PIN = 22;
+const float DXL_PROTOCOL_VERSION = 1.0;
+
+Dynamixel2Arduino dxl(DXL_SERIAL, DXL_DIR_PIN);
+
+// =====================================================
+//                  РЕЖИМ БЕЗОПАСНОСТИ
+// =====================================================
+
+// 1 — только считает и печатает траекторию; сервы не двигаются.
+// 0 — реальные команды приводам разрешены.
+#define DRY_RUN 0
+
+// 1 — перед началом движения ждёт символ g/G из Serial Monitor.
+#define WAIT_FOR_START_COMMAND 1
+
+// 1 — после одного полного круга остановиться.
+// 0 — повторять окружность бесконечно.
+#define ONE_CIRCLE_ONLY 1
+
+// =====================================================
+//                      ПРИВОДЫ
+// =====================================================
+const uint8_t ARM_JOINTS = 5;
+const uint8_t ACTUATOR_COUNT = 6;
+
+const uint8_t ARM_IDS[ARM_JOINTS] = {1, 2, 3, 4, 5};
+const uint8_t GRIPPER_ID = 6;
+
+// Безопасные программные границы.
+// Подберите по реальным механическим упорам манипулятора.
+const int SERVO_SAFE_MIN = 150;
+const int SERVO_SAFE_MAX = 920;
+
+const int SERVO_SPEED = 12;               // малая скорость для первого пуска
+const int GRIPPER_POSITION = 512;         // положение схвата
+const int POSITION_TOLERANCE = 18;        // допустимая ошибка позиции
+const unsigned long POINT_TIMEOUT_MS = 5000;
+const unsigned long FEEDBACK_PERIOD_MS = 200;
+
+// =====================================================
+//                 ГЕОМЕТРИЯ (МЕТРЫ)
+// =====================================================
+const float l1 = 0.103f;
+const float l2 = 0.1045f;
+const float l3 = 0.079f;
+const float l4 = 0.169f;
+
+const float DELTA_RAD_PER_TICK = 0.00511327f;
+const float PI_F = 3.14159265f;
+
+// =====================================================
+//                ПАРАМЕТРЫ ОКРУЖНОСТИ
+// =====================================================
+//
+// ТРИ ТОЧКИ ЛЕЖАТ В ПЛОСКОСТИ XY И ЗАДАНЫ В МЕТРАХ.
+//
+// Данные три точки задают окружность с центром примерно
+// (0.120, 0.000), радиусом 0.030 м.
+//
+// Не заменяйте метры миллиметрами:
+// 0.12 м — правильно;
+// 120   м — неправильно.
+//
+const float P1_X = 0.130f;
+const float P1_Y = 0.000f;
+
+const float P2_X = 0.100f;
+const float P2_Y = 0.030f;
+
+const float P3_X = 0.070f;
+const float P3_Y = 0.000f;
+
+// Постоянная высота и ориентация на всей окружности.
+const float CIRCLE_Z = 0.050f;       // м
+const float FI_TARGET_DEG = 0.0f;    // градусы
+
+// Чем больше точек — тем плавнее траектория,
+// но тем больше расчётов и команд.
+const uint8_t CIRCLE_POINTS_COUNT = 24;
+
+// Пауза после отправки следующей точки.
+// Увеличьте при тяжёлом манипуляторе.
+const unsigned long POINT_DELAY_MS = 500;
+
+// =====================================================
+//                  МАССИВЫ ТРАЕКТОРИИ
+// =====================================================
+struct JointSolution {
+  int pos[ARM_JOINTS];
+  float rad[ARM_JOINTS];
+};
+
+struct TrajectoryPoint {
+  float x;
+  float y;
+  float z;
+  float fi;
+  JointSolution joints;
+};
+
+TrajectoryPoint trajectory[CIRCLE_POINTS_COUNT];
+int trajectoryLength = 0;
+
+// =====================================================
+//                  ВСПОМОГАТЕЛЬНОЕ
+// =====================================================
+void printLine() {
+  DEBUG_SERIAL.println(F("------------------------------------------------"));
+}
+
+bool isFiniteValue(float value) {
+  return !isnan(value) && !isinf(value);
+}
+
+bool isSafeServoPosition(int position) {
+  return position >= SERVO_SAFE_MIN && position <= SERVO_SAFE_MAX;
+}
+
+void fatalStop(const __FlashStringHelper *message) {
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.print(F("STOP: "));
+  DEBUG_SERIAL.println(message);
+
+  // Не включаем/не выключаем torque здесь:
+  // при ошибке безопаснее сохранить текущее состояние приводов.
+  while (true) {
+    delay(1000);
+  }
+}
+
+// =====================================================
+//           ОБРАТНАЯ ЗАДАЧА КИНЕМАТИКИ
+// =====================================================
+//
+// Использует формулы из первоначальной программы,
+// но вместо atan(y/x) применяет atan2(y,x) и выполняет
+// проверку досягаемости до вызова acos().
+//
+bool solveInverseKinematics(float x, float y, float z, float fiDeg,
+                            JointSolution &solution) {
+  float z_r = z + (l4 - l1);
+  float k = sqrtf(x * x + y * y);
+  float d = sqrtf(k * k + z_r * z_r);
+
+  DEBUG_SERIAL.print(F("  k="));
+  DEBUG_SERIAL.print(k, 5);
+  DEBUG_SERIAL.print(F(", z_r="));
+  DEBUG_SERIAL.print(z_r, 5);
+  DEBUG_SERIAL.print(F(", d="));
+  DEBUG_SERIAL.println(d, 5);
+
+  if (k < 0.0001f || d < 0.0001f) {
+    DEBUG_SERIAL.println(F("  FAIL: k or d is too small"));
+    return false;
+  }
+
+  float minReach = fabsf(l2 - l3);
+  float maxReach = l2 + l3;
+
+  if (d < minReach || d > maxReach) {
+    DEBUG_SERIAL.print(F("  FAIL: d outside ["));
+    DEBUG_SERIAL.print(minReach, 5);
+    DEBUG_SERIAL.print(F("; "));
+    DEBUG_SERIAL.print(maxReach, 5);
+    DEBUG_SERIAL.println(F("]"));
+    return false;
+  }
+
+  float cosA = (d * d + l2 * l2 - l3 * l3) / (2.0f * d * l2);
+  float cosB = (-d * d + l2 * l2 + l3 * l3) / (2.0f * l2 * l3);
+
+  if (cosA < -1.0001f || cosA > 1.0001f ||
+      cosB < -1.0001f || cosB > 1.0001f) {
+    DEBUG_SERIAL.println(F("  FAIL: acos argument outside [-1;1]"));
+    return false;
+  }
+
+  cosA = constrain(cosA, -1.0f, 1.0f);
+  cosB = constrain(cosB, -1.0f, 1.0f);
+
+  float alf1 = atan2f(y, x);
+  float alf2 = PI_F / 2.0f - (atan2f(z_r, k) + acosf(cosA));
+  float alf3 = PI_F - acosf(cosB);
+  float alf4 = PI_F - (alf2 + alf3);
+  float alf5 = alf1;
+
+  solution.rad[0] = alf1;
+  solution.rad[1] = alf2;
+  solution.rad[2] = alf3;
+  solution.rad[3] = alf4;
+  solution.rad[4] = alf5;
+
+  solution.pos[0] = 512 + (int)lroundf(alf1 / DELTA_RAD_PER_TICK)
+                          + (int)lroundf(fiDeg * 3.41f);
+  solution.pos[1] = 512 + (int)lroundf(alf2 / DELTA_RAD_PER_TICK);
+  solution.pos[2] = 512 + (int)lroundf(alf3 / DELTA_RAD_PER_TICK);
+  solution.pos[3] = 512 + (int)lroundf(alf4 / DELTA_RAD_PER_TICK);
+  solution.pos[4] = 512 + (int)lroundf(alf5 / DELTA_RAD_PER_TICK);
+
+  DEBUG_SERIAL.print(F("  positions: "));
+  for (uint8_t i = 0; i < ARM_JOINTS; i++) {
+    DEBUG_SERIAL.print(solution.pos[i]);
+    DEBUG_SERIAL.print(' ');
+  }
+  DEBUG_SERIAL.println();
+
+  for (uint8_t i = 0; i < ARM_JOINTS; i++) {
+    if (!isSafeServoPosition(solution.pos[i])) {
+      DEBUG_SERIAL.print(F("  FAIL: ID "));
+      DEBUG_SERIAL.print(ARM_IDS[i]);
+      DEBUG_SERIAL.print(F(" has position "));
+      DEBUG_SERIAL.print(solution.pos[i]);
+      DEBUG_SERIAL.print(F(", but allowed range is "));
+      DEBUG_SERIAL.print(SERVO_SAFE_MIN);
+      DEBUG_SERIAL.print(F("..."));
+      DEBUG_SERIAL.println(SERVO_SAFE_MAX);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+// =====================================================
+//      ЦЕНТР И РАДИУС ОКРУЖНОСТИ ПО ТРЁМ ТОЧКАМ
+// =====================================================
+bool computeCircleCenter(float x1, float y1,
+                         float x2, float y2,
+                         float x3, float y3,
+                         float &xc, float &yc, float &radius) {
+  float determinant = 2.0f * (
+      x1 * (y2 - y3) +
+      x2 * (y3 - y1) +
+      x3 * (y1 - y2)
+  );
+
+  // Точки на одной прямой: окружность не существует.
+  if (fabsf(determinant) < 1e-8f) {
+    return false;
+  }
+
+  float q1 = x1 * x1 + y1 * y1;
+  float q2 = x2 * x2 + y2 * y2;
+  float q3 = x3 * x3 + y3 * y3;
+
+  float xcResult = (
+      q1 * (y2 - y3) +
+      q2 * (y3 - y1) +
+      q3 * (y1 - y2)
+  ) / determinant;
+
+  float ycResult = (
+      q1 * (x3 - x2) +
+      q2 * (x1 - x3) +
+      q3 * (x2 - x1)
+  ) / determinant;
+
+  float rResult = sqrtf(
+      (xcResult - x1) * (xcResult - x1) +
+      (ycResult - y1) * (ycResult - y1)
+  );
+
+  if (!isFiniteValue(xcResult) || !isFiniteValue(ycResult) ||
+      !isFiniteValue(rResult) || rResult < 0.001f) {
+    return false;
+  }
+
+  xc = xcResult;
+  yc = ycResult;
+  radius = rResult;
+  return true;
+}
+
+// =====================================================
+//           ПОСТРОЕНИЕ ТРАЕКТОРИИ ПО ОКРУЖНОСТИ
+// =====================================================
+//
+// Возвращает число рассчитанных точек.
+// Если хотя бы одна точка не проходит кинематику либо
+// безопасные пределы — возвращает 0, движения не будет.
+//
+int buildCircleTrajectory() {
+  float xc, yc, radius;
+
+  if (!computeCircleCenter(P1_X, P1_Y, P2_X, P2_Y, P3_X, P3_Y,
+                           xc, yc, radius)) {
+    DEBUG_SERIAL.println(F("ERROR: cannot construct circle."));
+    return 0;
+  }
+
+  printLine();
+  DEBUG_SERIAL.println(F("CIRCLE PARAMETERS"));
+  DEBUG_SERIAL.print(F("Center X = "));
+  DEBUG_SERIAL.println(xc, 5);
+  DEBUG_SERIAL.print(F("Center Y = "));
+  DEBUG_SERIAL.println(yc, 5);
+  DEBUG_SERIAL.print(F("Radius   = "));
+  DEBUG_SERIAL.println(radius, 5);
+  DEBUG_SERIAL.print(F("Z        = "));
+  DEBUG_SERIAL.println(CIRCLE_Z, 5);
+  printLine();
+
+  // Угол первой точки: траектория начинается именно из P1.
+  float startAngle = atan2f(P1_Y - yc, P1_X - xc);
+
+  for (uint8_t i = 0; i < CIRCLE_POINTS_COUNT; i++) {
+    float angle = startAngle + 2.0f * PI_F * (float)i / (float)CIRCLE_POINTS_COUNT;
+
+    trajectory[i].x = xc + radius * cosf(angle);
+    trajectory[i].y = yc + radius * sinf(angle);
+    trajectory[i].z = CIRCLE_Z;
+    trajectory[i].fi = FI_TARGET_DEG;
+
+    if (!solveInverseKinematics(trajectory[i].x,
+                                trajectory[i].y,
+                                trajectory[i].z,
+                                trajectory[i].fi,
+                                trajectory[i].joints)) {
+      DEBUG_SERIAL.print(F("ERROR: unsafe/unreachable point #"));
+      DEBUG_SERIAL.println(i);
+
+      DEBUG_SERIAL.print(F("X = "));
+      DEBUG_SERIAL.println(trajectory[i].x, 5);
+      DEBUG_SERIAL.print(F("Y = "));
+      DEBUG_SERIAL.println(trajectory[i].y, 5);
+      DEBUG_SERIAL.print(F("Z = "));
+      DEBUG_SERIAL.println(trajectory[i].z, 5);
+
+      return 0;
+    }
+  }
+
+  return CIRCLE_POINTS_COUNT;
+}
+
+// =====================================================
+//                  ВЫВОД ТРАЕКТОРИИ
+// =====================================================
+void printTrajectory(int count) {
+  printLine();
+  DEBUG_SERIAL.println(F("TRAJECTORY TABLE"));
+  DEBUG_SERIAL.println(F("N | X | Y | Z | ID1 ID2 ID3 ID4 ID5"));
+
+  for (int i = 0; i < count; i++) {
+    DEBUG_SERIAL.print(i);
+    DEBUG_SERIAL.print(F(" | "));
+
+    DEBUG_SERIAL.print(trajectory[i].x, 4);
+    DEBUG_SERIAL.print(F(" | "));
+
+    DEBUG_SERIAL.print(trajectory[i].y, 4);
+    DEBUG_SERIAL.print(F(" | "));
+
+    DEBUG_SERIAL.print(trajectory[i].z, 4);
+    DEBUG_SERIAL.print(F(" | "));
+
+    for (uint8_t j = 0; j < ARM_JOINTS; j++) {
+      DEBUG_SERIAL.print(trajectory[i].joints.pos[j]);
+      DEBUG_SERIAL.print(' ');
+    }
+
+    DEBUG_SERIAL.println();
+  }
+
+  printLine();
+}
+
+// =====================================================
+//                 НАСТРОЙКА DYNAMIXEL
+// =====================================================
+bool configureServo(uint8_t id) {
+  if (!dxl.ping(id)) {
+    DEBUG_SERIAL.print(F("ERROR: Dynamixel ID "));
+    DEBUG_SERIAL.print(id);
+    DEBUG_SERIAL.println(F(" not found."));
+    return false;
+  }
+
+  dxl.torqueOff(id);
+  delay(20);
+
+  if (!dxl.setOperatingMode(id, OP_POSITION)) {
+    DEBUG_SERIAL.print(F("ERROR: cannot set position mode for ID "));
+    DEBUG_SERIAL.println(id);
+    return false;
+  }
+
+  dxl.setGoalVelocity(id, SERVO_SPEED);
+
+  // При включении момента назначаем текущую позицию целью,
+  // чтобы привод не дёрнулся до старта траектории.
+  int presentPosition = (int)dxl.getPresentPosition(id);
+
+  if (presentPosition < 0 || presentPosition > 1023) {
+    DEBUG_SERIAL.print(F("ERROR: invalid position from ID "));
+    DEBUG_SERIAL.println(id);
+    return false;
+  }
+
+  dxl.setGoalPosition(id, presentPosition);
+  dxl.torqueOn(id);
+
+  DEBUG_SERIAL.print(F("ID "));
+  DEBUG_SERIAL.print(id);
+  DEBUG_SERIAL.print(F(" initial position = "));
+  DEBUG_SERIAL.println(presentPosition);
+
+  return true;
+}
+
+bool configureAllServos() {
+  printLine();
+  DEBUG_SERIAL.println(F("CHECKING DYNAMIXEL"));
+
+  for (uint8_t i = 0; i < ARM_JOINTS; i++) {
+    if (!configureServo(ARM_IDS[i])) {
+      return false;
+    }
+  }
+
+  if (!configureServo(GRIPPER_ID)) {
+    return false;
+  }
+
+  printLine();
+  return true;
+}
+
+// =====================================================
+//                  ПЕРЕМЕЩЕНИЕ В ТОЧКУ
+// =====================================================
+void sendTrajectoryPoint(int pointIndex) {
+  if (pointIndex < 0 || pointIndex >= trajectoryLength) {
+    return;
+  }
+
+  DEBUG_SERIAL.print(F("Send point #"));
+  DEBUG_SERIAL.println(pointIndex);
+
+  for (uint8_t i = 0; i < ARM_JOINTS; i++) {
+    dxl.setGoalVelocity(ARM_IDS[i], SERVO_SPEED);
+    dxl.setGoalPosition(ARM_IDS[i], trajectory[pointIndex].joints.pos[i]);
+  }
+
+  dxl.setGoalVelocity(GRIPPER_ID, SERVO_SPEED);
+  dxl.setGoalPosition(GRIPPER_ID, GRIPPER_POSITION);
+}
+
+bool isPointReached(int pointIndex) {
+  bool allArrived = true;
+
+  for (uint8_t i = 0; i < ARM_JOINTS; i++) {
+    int actual = (int)dxl.getPresentPosition(ARM_IDS[i]);
+    int target = trajectory[pointIndex].joints.pos[i];
+    int error = target - actual;
+
+    if (abs(error) > POSITION_TOLERANCE) {
+      allArrived = false;
+    }
+  }
+
+  return allArrived;
+}
+
+bool waitForPoint(int pointIndex) {
+  unsigned long startTime = millis();
+
+  while (millis() - startTime < POINT_TIMEOUT_MS) {
+    if (isPointReached(pointIndex)) {
+      DEBUG_SERIAL.print(F("Point #"));
+      DEBUG_SERIAL.print(pointIndex);
+      DEBUG_SERIAL.println(F(" reached."));
+      return true;
+    }
+
+    delay(FEEDBACK_PERIOD_MS);
+  }
+
+  DEBUG_SERIAL.print(F("WARNING: timeout at point #"));
+  DEBUG_SERIAL.println(pointIndex);
+  return false;
+}
+
+bool executeCircleOnce() {
+  // Подход к первой точке — выполняется медленнее,
+  // затем начинается обход окружности.
+  sendTrajectoryPoint(0);
+
+  if (!waitForPoint(0)) {
+    DEBUG_SERIAL.println(F("STOP: cannot reach initial circle point."));
+    return false;
+  }
+
+  delay(500);
+
+  // Точки 1..N-1 обходят окружность.
+  for (int i = 1; i < trajectoryLength; i++) {
+    sendTrajectoryPoint(i);
+
+    if (!waitForPoint(i)) {
+      DEBUG_SERIAL.println(F("STOP: trajectory interrupted."));
+      return false;
+    }
+
+    delay(POINT_DELAY_MS);
+  }
+
+  // Замыкаем окружность: возвращаемся в её первую точку.
+  sendTrajectoryPoint(0);
+
+  if (!waitForPoint(0)) {
+    DEBUG_SERIAL.println(F("STOP: cannot close circle."));
+    return false;
+  }
+
+  DEBUG_SERIAL.println(F("Circle completed."));
+  return true;
+}
+
+// =====================================================
+//                         SETUP
+// =====================================================
+void setup() {
+  DEBUG_SERIAL.begin(57600);
+  delay(1500);
+
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println(F("=== CIRCLE TRAJECTORY DEBUG ==="));
+
+  // 1. Строим и полностью проверяем траекторию.
+  // Пока этот этап не завершён, приводам команды не отправляются.
+  trajectoryLength = buildCircleTrajectory();
+
+  if (trajectoryLength == 0) {
+    fatalStop(F("trajectory is invalid"));
+  }
+
+  printTrajectory(trajectoryLength);
+
+#if DRY_RUN
+  DEBUG_SERIAL.println(F("DRY_RUN = 1: servos will not move."));
+  DEBUG_SERIAL.println(F("Check the table, then set DRY_RUN to 0."));
+  while (true) {
+    delay(1000);
+  }
+#endif
+
+  // 2. Подключаем и проверяем реальные приводы.
+  dxl.begin(1000000);
+  dxl.setPortProtocolVersion(DXL_PROTOCOL_VERSION);
+
+  if (!configureAllServos()) {
+    fatalStop(F("servo setup failed"));
+  }
+
+#if WAIT_FOR_START_COMMAND
+  DEBUG_SERIAL.println(F("Send 'g' in Serial Monitor to start a circle."));
+
+  while (true) {
+    if (DEBUG_SERIAL.available() > 0) {
+      char command = DEBUG_SERIAL.read();
+
+      if (command == 'g' || command == 'G') {
+        break;
+      }
+    }
+
+    delay(10);
+  }
+#endif
+
+  DEBUG_SERIAL.println(F("Starting trajectory..."));
+
+  if (!executeCircleOnce()) {
+    fatalStop(F("circle execution failed"));
+  }
+
+#if ONE_CIRCLE_ONLY
+  DEBUG_SERIAL.println(F("One-circle mode: trajectory complete."));
+#else
+  DEBUG_SERIAL.println(F("Continuous-circle mode enabled."));
+#endif
+}
+
+// =====================================================
+//                         LOOP
+// =====================================================
+void loop() {
+#if !ONE_CIRCLE_ONLY && !DRY_RUN
+  if (!executeCircleOnce()) {
+    fatalStop(F("circle execution failed"));
+  }
+  delay(1000);
+#else
+  delay(1000);
+#endif
+}

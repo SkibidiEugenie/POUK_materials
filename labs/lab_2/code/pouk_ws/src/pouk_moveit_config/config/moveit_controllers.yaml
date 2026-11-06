@@ -1,0 +1,16 @@
+# Исполнение траекторий: MoveIt отдаёт план мосту стенда по протоколу цели FollowJointTrajectory.
+# Никакой «фиктивной» отработки: joint_states публикует мост по телеметрии МК (ЛР4-А).
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - arm_controller
+  # >>> STUDENT ЛР4А-шаг2: описание исполнителя — тип, пространство имён действия и суставы
+  # >>> должны совпасть с тем, что объявляет мост (параметр action_name и joint_names).
+  arm_controller: {}  # TODO: type, action_ns, default, joints
+  # <<< STUDENT
+
+trajectory_execution:
+  allowed_execution_duration_scaling: 1.2     # MoveIt ждёт не дольше 1,2 T + запас
+  allowed_goal_duration_margin: 1.5           # ≥ goal_time_tolerance моста
+  allowed_start_tolerance: 0.05               # рад: люфт и дискретность AX-12A

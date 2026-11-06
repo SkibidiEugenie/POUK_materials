@@ -1,0 +1,229 @@
+# -*- coding: utf-8 -*-
+"""Протокол стенда, версия 2: пакеты, CRC-32, автомат приёмника.
+
+Спецификация — «Инструкция ЛР2», раздел «Протокол стенда v2». Кратко:
+
+    кадр на линии : COBS(пакет) + 0x00
+    пакет         : type(1) session(1) seq(2) len(1) payload(len) crc32(4)
+    session       : случайный номер, выбираемый отправителем при запуске
+    seq           : номер пакета ДАННОГО ТИПА у отправителя (разрыв = потери этого типа)
+    CRC-32        : ISO-HDLC (как в Ethernet и zlib) по байтам type..payload
+    порядок байтов: little-endian
+
+Модуль не зависит от ROS и от последовательного порта: его можно проверять
+модульными тестами на любом компьютере (пособие, §3.8.2).
+"""
+import struct
+import zlib
+from collections import namedtuple
+
+from . import cobs
+
+# ------------------------------------------------------------------ константы
+PROTO_VERSION = 2
+BAUD = 115200
+N_JOINTS = 6                 # ID 1..5 — звенья, ID 6 — схват
+
+HEADER = struct.Struct('<BBHB')      # type, session, seq, len
+CRC = struct.Struct('<I')
+HEADER_LEN = HEADER.size             # 5
+CRC_LEN = CRC.size                   # 4
+MIN_PACKET = HEADER_LEN + CRC_LEN    # 9
+MAX_PAYLOAD = 24                     # пакет не длиннее 33 байт = 264 бит ≤ 268:
+                                     # CRC-32 сохраняет кодовое расстояние 6 (рис. 2.5)
+MAX_ENCODED = 64                     # буфер приёмника под закодированный кадр
+
+# типы пакетов: старший бит — направление (0: ПК/одноплатник -> МК, 1: МК -> вверх)
+T_CMD_JOINTS = 0x01
+T_CMD_MODE = 0x02
+T_ACK = 0x81
+T_TELEM = 0x82
+T_DIAG = 0x83
+
+PAYLOAD = {
+    T_CMD_JOINTS: struct.Struct('<H6hH'),    # cmd_id, q[6] мрад, vmax мрад/с
+    T_CMD_MODE: struct.Struct('<HB'),        # cmd_id, mode
+    T_ACK: struct.Struct('<HBB'),            # cmd_id, result, reason
+    T_TELEM: struct.Struct('<I6hBBH'),       # t_ms, q[6] мрад, state, flags, last_cmd
+    T_DIAG: struct.Struct('<I10H'),          # счётчики МК, см. DiagPayload
+}
+TYPE_NAMES = {T_CMD_JOINTS: 'CMD_JOINTS', T_CMD_MODE: 'CMD_MODE', T_ACK: 'ACK',
+              T_TELEM: 'TELEM', T_DIAG: 'DIAG'}
+
+# режимы (CMD_MODE.mode)
+MODE_HOLD, MODE_RUN, MODE_RELAX = 0, 1, 2
+MODE_BY_NAME = {'hold': MODE_HOLD, 'run': MODE_RUN, 'relax': MODE_RELAX}
+
+# состояния МК (TELEM.state)
+ST_BOOT, ST_HOLD, ST_RUN, ST_WD_STOP, ST_RELAX, ST_FAULT = range(6)
+STATE_NAMES = {ST_BOOT: 'BOOT', ST_HOLD: 'HOLD', ST_RUN: 'RUN', ST_WD_STOP: 'WD_STOP',
+               ST_RELAX: 'RELAX', ST_FAULT: 'FAULT'}
+
+# флаги (TELEM.flags)
+F_MOVING = 0x01          # хотя бы один привод не дошёл до уставки
+F_BUS_ERROR = 0x02       # последний обмен с приводами завершился ошибкой
+F_CMD_REJECTED = 0x04    # последняя команда отклонена
+F_TORQUE_ON = 0x08       # момент подан
+
+# ACK.result / ACK.reason
+ACCEPTED, REJECTED = 0, 1
+R_OK, R_LIMITS, R_MODE, R_STALE, R_BAD_VALUE = range(5)
+REASON_NAMES = {R_OK: 'OK', R_LIMITS: 'LIMITS', R_MODE: 'MODE', R_STALE: 'STALE',
+                R_BAD_VALUE: 'BAD_VALUE'}
+
+Packet = namedtuple('Packet', 'type session seq payload')
+CmdJoints = namedtuple('CmdJoints', 'cmd_id q vmax')          # q, vmax — в радианах
+CmdMode = namedtuple('CmdMode', 'cmd_id mode')
+Ack = namedtuple('Ack', 'cmd_id result reason')
+Telem = namedtuple('Telem', 't_ms q state flags last_cmd')    # q — в радианах
+DiagPayload = namedtuple('DiagPayload', 'rx_ok crc_err cobs_err len_err timeout overflow '
+                                        'stale_cmd wd_trips max_cmd_gap_ms loop_max_us reserved')
+
+
+# ------------------------------------------------------------------ единицы
+def rad_to_mrad(a):
+    """Радианы -> целые миллирадианы int16 с насыщением."""
+    v = int(round(a * 1000.0))
+    return max(-32768, min(32767, v))
+
+
+def mrad_to_rad(v):
+    return v / 1000.0
+
+
+# ------------------------------------------------------------------ CRC и пакеты
+def crc32(data):
+    """CRC-32/ISO-HDLC: полином 0x04C11DB7 (отражённый 0xEDB88320), init и xorout 0xFFFFFFFF."""
+    return zlib.crc32(bytes(data)) & 0xFFFFFFFF
+
+
+def build_packet(ptype, session, seq, payload):
+    payload = bytes(payload)
+    if len(payload) > MAX_PAYLOAD:
+        raise ValueError('полезная нагрузка длиннее %d байт' % MAX_PAYLOAD)
+    head = HEADER.pack(ptype, session & 0xFF, seq & 0xFFFF, len(payload))
+    body = head + payload
+    return body + CRC.pack(crc32(body))
+
+
+def build_frame(ptype, session, seq, payload):
+    """Пакет -> байты на линии: COBS + разделитель 0x00."""
+    return cobs.encode(build_packet(ptype, session, seq, payload)) + b'\x00'
+
+
+def pack_cmd_joints(cmd_id, q, vmax=0.0):
+    if len(q) != N_JOINTS:
+        raise ValueError('нужно %d углов' % N_JOINTS)
+    return PAYLOAD[T_CMD_JOINTS].pack(cmd_id & 0xFFFF, *[rad_to_mrad(a) for a in q],
+                                      max(0, min(65535, int(round(vmax * 1000.0)))))
+
+
+def pack_cmd_mode(cmd_id, mode):
+    return PAYLOAD[T_CMD_MODE].pack(cmd_id & 0xFFFF, mode)
+
+
+def pack_ack(cmd_id, result, reason):
+    return PAYLOAD[T_ACK].pack(cmd_id & 0xFFFF, result, reason)
+
+
+def pack_telem(t_ms, q, state, flags, last_cmd):
+    return PAYLOAD[T_TELEM].pack(t_ms & 0xFFFFFFFF, *[rad_to_mrad(a) for a in q],
+                                 state, flags, last_cmd & 0xFFFF)
+
+
+def pack_diag(d):
+    return PAYLOAD[T_DIAG].pack(*d)
+
+
+def unpack(pkt):
+    """Packet -> именованный кортеж полезной нагрузки своего типа."""
+    raw = PAYLOAD[pkt.type].unpack(pkt.payload)
+    if pkt.type == T_CMD_JOINTS:
+        return CmdJoints(raw[0], [mrad_to_rad(v) for v in raw[1:7]], raw[7] / 1000.0)
+    if pkt.type == T_CMD_MODE:
+        return CmdMode(*raw)
+    if pkt.type == T_ACK:
+        return Ack(*raw)
+    if pkt.type == T_TELEM:
+        return Telem(raw[0], [mrad_to_rad(v) for v in raw[1:7]], raw[7], raw[8], raw[9])
+    return DiagPayload(*raw)
+
+
+def seq_distance(new, old):
+    """Сколько номеров прошло от old до new по модулю 2^16 (0..65535)."""
+    return (new - old) & 0xFFFF
+
+
+# ------------------------------------------------------------------ приёмник
+class RxError(object):
+    """Виды отказов приёма — у каждого свой счётчик (пособие, §2.8.1)."""
+    COBS = 'cobs_err'          # нарушена кодировка COBS
+    LENGTH = 'len_err'         # длина пакета не сходится с полем len
+    CRC = 'crc_err'            # контрольная сумма не сошлась
+    TYPE = 'type_err'          # неизвестный тип или длина не соответствует типу
+    OVERFLOW = 'overflow'      # кадр длиннее буфера приёмника
+    TIMEOUT = 'timeout'        # межбайтовый тайм-аут внутри кадра
+
+
+def parse_packet(raw):
+    """Раскодированный COBS пакет -> (Packet, None) или (None, RxError.*)."""
+    if len(raw) < MIN_PACKET:
+        return None, RxError.LENGTH
+    ptype, session, seq, plen = HEADER.unpack_from(raw, 0)
+    if len(raw) != MIN_PACKET + plen:
+        return None, RxError.LENGTH
+    body = raw[:HEADER_LEN + plen]
+    (crc,) = CRC.unpack_from(raw, HEADER_LEN + plen)
+    if crc32(body) != crc:
+        return None, RxError.CRC
+    st = PAYLOAD.get(ptype)
+    if st is None or st.size != plen:
+        return None, RxError.TYPE
+    return Packet(ptype, session, seq, bytes(raw[HEADER_LEN:HEADER_LEN + plen])), None
+
+
+class Receiver(object):
+    """Автомат приёмника кадров COBS с полной функцией переходов.
+
+    Состояния:
+      WAIT     — между кадрами, буфер пуст;
+      IN_FRAME — накапливаем байты кадра;
+      DISCARD  — кадр переполнил буфер, пропускаем байты до разделителя.
+
+    Событие «тайм-аут» — пауза между соседними байтами кадра дольше
+    interbyte_timeout; проверяется при поступлении очередного байта и в poll().
+
+    feed() возвращает список результатов в порядке поступления: для каждого
+    завершённого кадра — Packet, для каждого отказа — строка RxError.*.
+    """
+    WAIT, IN_FRAME, DISCARD = 0, 1, 2
+
+    def __init__(self, max_encoded=MAX_ENCODED, interbyte_timeout=0.05):
+        self.max_encoded = max_encoded
+        self.interbyte_timeout = interbyte_timeout
+        self.state = self.WAIT
+        self.buf = bytearray()
+        self.last_byte_t = None
+
+    def reset(self):
+        self.state = self.WAIT
+        self.buf = bytearray()
+
+    def poll(self, now):
+        """Проверить тайм-аут без новых байтов. Возвращает список отказов (0 или 1)."""
+        out = []
+        if (self.state != self.WAIT and self.last_byte_t is not None
+                and now - self.last_byte_t > self.interbyte_timeout):
+            if self.state == self.IN_FRAME:
+                out.append(RxError.TIMEOUT)
+            self.reset()
+        return out
+
+    def feed(self, data, now):
+        out = []
+        for b in bytes(data):
+            # >>> STUDENT ЛР2-шаг4: автомат приёмника. Реализуйте переходы по таблице
+            # >>> из инструкции: тайм-аут -> байт 0x00 -> прочий байт, для трёх состояний.
+            
+            # <<< STUDENT
+        return out

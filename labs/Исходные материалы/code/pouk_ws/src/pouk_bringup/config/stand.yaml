@@ -1,0 +1,20 @@
+# Профиль «реальный стенд»: мост на одноплатнике NanoPi, порт — UART к OpenCM (ЛР2).
+# Различия с профилем sim.yaml перечислимы и собраны здесь (пособие, §5.2.3).
+stand_bridge:
+  ros__parameters:
+    port: /dev/ttyS1
+    baud: 115200
+    joint_names: [joint1, joint2, joint3, joint4, joint5, gripper_joint]
+    joint_signs: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]     # калибровка своей сборки: ЛР3, шаг 2
+    joint_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    stream_hz: 50.0              # не реже 1/(T_wd/2): расчёт ЛР2, шаг 7
+    joint_states_rate: 50.0
+    command_vmax: 1.2            # рад/с, для команд по топику
+    trajectory_vmax: 2.0         # рад/с, предел привода при исполнении траектории
+    auto_run: false              # на реальном стенде RUN включает человек: ros2 service call /stand/run ...
+    path_tolerance: 0.15         # рад, по умолчанию, если клиент не задал
+    goal_tolerance: 0.05
+    goal_time_tolerance: 1.0     # с
+    start_tolerance: 0.10
+    exec_rate: 100.0
+    log_prefix: ''               # например /home/pi/logs/run1 — журналы CSV как в ЛР2

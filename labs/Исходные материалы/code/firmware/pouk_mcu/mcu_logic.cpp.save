@@ -1,0 +1,224 @@
+// Логика прошивки стенда. См. mcu_logic.h и «Инструкцию ЛР2».
+#include "mcu_logic.h"
+
+namespace pouk {
+
+static const uint16_t MOVING_EPS_MRAD = 10;       // ≈ 2 отсчёта AX-12A
+static const uint16_t BUS_FAIL_TO_FAULT = 20;     // подряд неудачных чтений -> FAULT
+
+void defaultConfig(McuConfig &cfg) {
+  cfg.wd_timeout_ms = 60;          // ЗАМЕНИТЕ расчётным значением (ЛР2, шаг 7)
+  cfg.telem_period_ms = 10;        // 100 Гц
+  cfg.diag_period_ms = 1000;
+  cfg.default_vmax = 1200;         // мрад/с
+  // пределы = пределы каркаса ЛР1 в отсчётах, пересчитанные в мрад: (t - 512) * 5.11327
+  static const int16_t qmin[N_JOINTS] = {-1790, -1278, -1278, -767, -1790, -1023};
+  static const int16_t qmax[N_JOINTS] = { 1790,  1278,  1943, 1943,  1790,  1023};
+  for (uint8_t j = 0; j < N_JOINTS; j++) { cfg.q_min[j] = qmin[j]; cfg.q_max[j] = qmax[j]; }
+}
+
+McuLogic::McuLogic(BusIface &bus, LinkTx &tx, const McuConfig &cfg, uint8_t session)
+    : bus_(bus), tx_(tx), cfg_(cfg), rx_(2000),
+      session_(session), state_(ST_BOOT), flags_(0),
+      have_sbc_session_(false), sbc_session_(0), have_last_cmd_(false), last_cmd_id_(0),
+      last_cmd_ms_(0), max_cmd_gap_ms_(0), next_telem_ms_(0), next_diag_ms_(0),
+      stale_cmd_(0), wd_trips_(0), loop_max_us_(0), bus_fail_(0) {
+  for (uint8_t j = 0; j < N_JOINTS; j++) { goal_[j] = 0; present_[j] = 0; }
+  seq_[0] = seq_[1] = seq_[2] = 0;
+}
+
+void McuLogic::begin(uint32_t now_ms) {
+  hold();                                    // безопасный старт: удержание там, где стоим
+  state_ = ST_HOLD;
+  next_telem_ms_ = now_ms;
+  next_diag_ms_ = now_ms;
+}
+
+void McuLogic::hold() {
+  if (bus_.readPositions(present_)) {
+    for (uint8_t j = 0; j < N_JOINTS; j++) goal_[j] = present_[j];
+    flags_ &= (uint8_t)~F_BUS_ERROR;
+  } else {
+    flags_ |= F_BUS_ERROR;                   // уставки остаются прежними
+  }
+  bus_.writeGoals(goal_, cfg_.default_vmax / 2);
+  bus_.setTorque(true);
+  flags_ |= F_TORQUE_ON;
+}
+
+void McuLogic::onByte(uint8_t b, uint32_t now_us, uint32_t now_ms) {
+  Packet pkt;
+  if (rx_.feed(b, now_us, pkt)) handle(pkt, now_ms);
+}
+
+void McuLogic::handle(const Packet &pkt, uint32_t now_ms) {
+  if (pkt.type != T_CMD_JOINTS && pkt.type != T_CMD_MODE) {
+    rx_.counters.len_err++;                  // пакет не для МК
+    return;
+  }
+  uint16_t cmd_id = getU16(pkt.payload);
+  if (!have_sbc_session_ || pkt.session != sbc_session_) {
+    have_sbc_session_ = true;                // перезапуск верхнего уровня: новая нумерация
+    sbc_session_ = pkt.session;
+    have_last_cmd_ = false;
+  }
+  // >>> STUDENT ЛР2-шаг6: идемпотентность и устаревшие команды.
+  // >>> d = (cmd_id - last_cmd_id_) mod 2^16. d == 0 — дубликат (повтор после потери ACK):
+  // >>> подтвердить ACCEPTED повторно, ничего не исполняя, и обновить время последней команды.
+  // >>> d > 32768 — команда старше последней принятой: REJECTED/R_STALE, счётчик stale_cmd_.
+  if (have_last_cmd_) {
+  uint16_t d = (uint16_t)(cmd_id - last_cmd_id_);
+  if (d == 0)       last_cmd_ms_ = now_ms;
+      sendAck(cmd_id, ACCEPTED, R_OK);
+      return;
+    }
+    if (d > 32768u) {
+      stale_cmd_++;
+      sendAck(cmd_id, REJECTED, R_STALE);
+      return;
+    }
+  }
+  // <<< STUDENT
+  if (pkt.type == T_CMD_MODE) {
+    onMode(cmd_id, pkt.payload[2], now_ms);
+  } else {
+    int16_t q[N_JOINTS];
+    for (uint8_t j = 0; j < N_JOINTS; j++) q[j] = getI16(pkt.payload + 2 + 2 * j);
+    onJoints(cmd_id, q, getU16(pkt.payload + 14), now_ms);
+  }
+}
+
+void McuLogic::onMode(uint16_t cmd_id, uint8_t mode, uint32_t now_ms) {
+  if (mode == MODE_HOLD) {
+    hold();
+    if (state_ == ST_FAULT && (flags_ & F_BUS_ERROR)) {
+      sendAck(cmd_id, REJECTED, R_MODE);     // шина по-прежнему не отвечает
+      return;
+    }
+    state_ = ST_HOLD;
+  } else if (mode == MODE_RUN) {
+    if (state_ == ST_RELAX || state_ == ST_FAULT) {
+      sendAck(cmd_id, REJECTED, R_MODE);     // сначала HOLD: подать момент без рывка
+      return;
+    }
+    if (state_ != ST_RUN) hold();            // движение начинается от текущего положения
+    state_ = ST_RUN;
+  } else if (mode == MODE_RELAX) {
+    bus_.setTorque(false);
+    flags_ &= (uint8_t)~F_TORQUE_ON;
+    state_ = ST_RELAX;
+  } else {
+    sendAck(cmd_id, REJECTED, R_BAD_VALUE);
+    return;
+  }
+  have_last_cmd_ = true;
+  last_cmd_id_ = cmd_id;
+  last_cmd_ms_ = now_ms;
+  sendAck(cmd_id, ACCEPTED, R_OK);
+}
+
+void McuLogic::onJoints(uint16_t cmd_id, const int16_t q[N_JOINTS], uint16_t vmax, uint32_t now_ms) {
+  if (state_ != ST_RUN) {
+    sendAck(cmd_id, REJECTED, R_MODE);
+    return;
+  }
+  // >>> STUDENT ЛР2-шаг6: проверка пределов ДО записи в приводы: если хотя бы один угол
+  // >>> вне [q_min; q_max] — REJECTED/R_LIMITS и ни одной записи в шину (не частично!).
+  // TODO: проверка пределов суставов
+  // <<< STUDENT
+  for (uint8_t j = 0; j < N_JOINTS; j++) goal_[j] = q[j];
+  if (!bus_.writeGoals(goal_, vmax ? vmax : cfg_.default_vmax)) flags_ |= F_BUS_ERROR;
+  if (have_last_cmd_) {
+    uint32_t gap = now_ms - last_cmd_ms_;
+    if (gap > max_cmd_gap_ms_) max_cmd_gap_ms_ = gap > 65535u ? 65535u : (uint16_t)gap;
+  }
+  have_last_cmd_ = true;
+  last_cmd_id_ = cmd_id;
+  last_cmd_ms_ = now_ms;
+  sendAck(cmd_id, ACCEPTED, R_OK);
+}
+
+void McuLogic::tick(uint32_t now_ms, uint32_t now_us) {
+  rx_.poll(now_us);
+  // >>> STUDENT ЛР2-шаг7: сторожевой таймер. В режиме RUN, если с последней принятой
+  // >>> команды прошло больше cfg_.wd_timeout_ms, — удержание текущего положения (hold()),
+  // >>> состояние ST_WD_STOP, счётчик wd_trips_. Выход из WD_STOP — только командой RUN.
+  // TODO: сторожевой таймер
+  // <<< STUDENT
+  if ((int32_t)(now_ms - next_telem_ms_) >= 0) {
+    sendTelem(now_ms);
+    next_telem_ms_ += cfg_.telem_period_ms;
+    if ((int32_t)(now_ms - next_telem_ms_) > (int32_t)cfg_.telem_period_ms) {
+      next_telem_ms_ = now_ms + cfg_.telem_period_ms;       // отстали: не догонять пачкой
+    }
+  }
+  if ((int32_t)(now_ms - next_diag_ms_) >= 0) {
+    sendDiag();
+    next_diag_ms_ = now_ms + cfg_.diag_period_ms;
+  }
+}
+
+void McuLogic::noteLoopTime(uint32_t loop_us) {
+  if (loop_us > loop_max_us_) loop_max_us_ = loop_us > 65535u ? 65535u : (uint16_t)loop_us;
+}
+
+void McuLogic::sendAck(uint16_t cmd_id, uint8_t result, uint8_t reason) {
+  uint8_t p[LEN_ACK];
+  putU16(p, cmd_id);
+  p[2] = result;
+  p[3] = reason;
+  if (result == REJECTED) flags_ |= F_CMD_REJECTED; else flags_ &= (uint8_t)~F_CMD_REJECTED;
+  send(T_ACK, p, LEN_ACK);
+}
+
+void McuLogic::sendTelem(uint32_t now_ms) {
+  if (bus_.readPositions(present_)) {
+    bus_fail_ = 0;
+    flags_ &= (uint8_t)~F_BUS_ERROR;
+  } else {
+    flags_ |= F_BUS_ERROR;
+    if (++bus_fail_ >= BUS_FAIL_TO_FAULT && state_ != ST_FAULT && state_ != ST_RELAX) {
+      state_ = ST_FAULT;
+    }
+  }
+  bool moving = false;
+  for (uint8_t j = 0; j < N_JOINTS; j++) {
+    int32_t e = (int32_t)goal_[j] - (int32_t)present_[j];
+    if (e > MOVING_EPS_MRAD || e < -(int32_t)MOVING_EPS_MRAD) moving = true;
+  }
+  if (moving && (flags_ & F_TORQUE_ON)) flags_ |= F_MOVING; else flags_ &= (uint8_t)~F_MOVING;
+  uint8_t p[LEN_TELEM];
+  putU32(p, now_ms);
+  for (uint8_t j = 0; j < N_JOINTS; j++) putU16(p + 4 + 2 * j, (uint16_t)present_[j]);
+  p[16] = state_;
+  p[17] = flags_;
+  putU16(p + 18, have_last_cmd_ ? last_cmd_id_ : 0);
+  send(T_TELEM, p, LEN_TELEM);
+}
+
+void McuLogic::sendDiag() {
+  const RxCounters &c = rx_.counters;
+  uint8_t p[LEN_DIAG];
+  putU32(p, c.rx_ok);
+  putU16(p + 4, c.crc_err);
+  putU16(p + 6, c.cobs_err);
+  putU16(p + 8, c.len_err);
+  putU16(p + 10, c.timeout);
+  putU16(p + 12, c.overflow);
+  putU16(p + 14, stale_cmd_);
+  putU16(p + 16, wd_trips_);
+  putU16(p + 18, max_cmd_gap_ms_);
+  putU16(p + 20, loop_max_us_);
+  putU16(p + 22, 0);
+  send(T_DIAG, p, LEN_DIAG);
+}
+
+void McuLogic::send(uint8_t type, const uint8_t *payload, uint8_t len) {
+  uint8_t frame[MAX_FRAME];
+  // номер пакета ведётся по каждому типу отдельно: разрыв номеров телеметрии = потери телеметрии
+  uint8_t k = (type == T_ACK) ? 0 : (type == T_TELEM ? 1 : 2);
+  size_t n = buildFrame(type, session_, seq_[k]++, payload, len, frame);
+  tx_.write(frame, n);
+}
+
+}  // namespace pouk
