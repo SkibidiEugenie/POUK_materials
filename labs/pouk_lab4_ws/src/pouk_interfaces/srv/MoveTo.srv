@@ -1,0 +1,10 @@
+# Move the gripper tip to a point of the stand workspace (gripper pointing down).
+# Coordinates are in base_link, meters. The goal is absolute: a repeated request is harmless.
+# (Comments are ASCII on purpose: rosidl writes IDL files in latin-1.)
+float64 x
+float64 y
+float64 z
+float64 vmax        # rad/s; 0 means default speed
+---
+bool accepted       # goal accepted, coordinator switched to MOVE_POINT
+string message      # rejection reason (unreachable, wrong state) or current state

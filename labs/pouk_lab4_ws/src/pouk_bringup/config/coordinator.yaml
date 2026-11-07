@@ -1,0 +1,15 @@
+coordinator:
+  ros__parameters:
+    joint_names: [joint1, joint2, joint3, joint4, joint5, gripper_joint]
+    reach_eps: 0.08          # рад: люфт + дискретность (обоснование — ЛР1, шаг 4)
+    reach_timeout: 8.0       # с на одну цель
+    vmax: 0.8                # рад/с
+    home: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    rate: 20.0
+    circle:
+      cx: 0.100
+      cy: 0.0
+      cz: 0.030
+      r: 0.030
+      n: 20
+      laps: 1

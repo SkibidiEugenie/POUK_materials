@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Семантическое описание стенда для MoveIt: группа планирования, именованные позы,
+  пары звеньев, проверку столкновений которых выполнять не нужно.
+-->
+<robot name="pouk_arm">
+  <!-- рука: цепь от основания до кончика схвата; схват (ID 6) в планирование не входит -->
+  <group name="arm">
+    <chain base_link="base_link" tip_link="tool0"/>
+  </group>
+
+  <group_state name="home" group="arm">
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="0"/>
+    <joint name="joint3" value="0"/>
+    <joint name="joint4" value="0"/>
+    <joint name="joint5" value="0"/>
+  </group_state>
+  <!-- схват вертикально над точкой (0,12; 0; 0,03) м — ОЗК приложения А -->
+  <group_state name="ready" group="arm">
+    <joint name="joint1" value="0"/>
+    <joint name="joint2" value="0.4032"/>
+    <joint name="joint3" value="1.1691"/>
+    <joint name="joint4" value="1.5693"/>
+    <joint name="joint5" value="0"/>
+  </group_state>
+
+  <!-- соседние звенья соприкасаются по конструкции -->
+  <disable_collisions link1="base_link" link2="link1" reason="Adjacent"/>
+  <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
+  <disable_collisions link1="link2" link2="link3" reason="Adjacent"/>
+  <disable_collisions link1="link3" link2="link4" reason="Adjacent"/>
+  <disable_collisions link1="link4" link2="link5" reason="Adjacent"/>
+  <disable_collisions link1="link5" link2="gripper_link" reason="Adjacent"/>
+  <!-- Задание ★: пары, которые при любых допустимых углах не пересекаются, можно
+       исключить для скорости (MoveIt Setup Assistant, вкладка Self-Collisions) -->
+</robot>

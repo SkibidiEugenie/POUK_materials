@@ -1,0 +1,9 @@
+# NTP-style clock probe (textbook, section 5.4.1), four timestamps:
+# t1 - client sent the request (client clock); t2 - server received it;
+# t3 - server replied (server clock); t4 - client received the reply (client clock).
+# offset theta = ((t2 - t1) + (t3 - t4)) / 2,  round-trip delay = (t4 - t1) - (t3 - t2)
+builtin_interfaces/Time t1
+---
+builtin_interfaces/Time t1
+builtin_interfaces/Time t2
+builtin_interfaces/Time t3

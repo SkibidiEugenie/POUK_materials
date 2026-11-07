@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pouk_coordinator</name>
+  <version>1.0.0</version>
+  <description>Координатор стенда ПОУК (ЛР3): автомат IDLE/HOMING/MOVE_POINT/CIRCLE/FAULT. Ядро автомата не зависит от ROS.</description>
+  <maintainer email="shereuzhev@gmail.com">М. А. Шереужев</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>pouk_link</exec_depend>
+  <exec_depend>pouk_interfaces</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
