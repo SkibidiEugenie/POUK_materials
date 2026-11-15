@@ -121,6 +121,22 @@ static void turn_in_place(double target_angle_deg, double speed) {
   printf("Поворот завершен!\n");
 }
 
+int visit_printer() {
+  // Движение вперёд
+  printf("\n--- Едем к точке 1 ---\n");
+  move_forward(2.0, 0.5); 
+
+  // ПОВОРОТ НАЛЕВО (положительный угол)
+  printf("\n--- Поворот на 90 град налево ---\n");
+  turn_in_place(90.0, 0.5);
+
+  printf("\n--- Едем к точке 2 ---\n");
+  move_forward(2.6, 0.5);
+
+  printf("\n=== ГОТОВО! ===\n");
+  return 1;
+}
+
 int main(int argc, char **argv) {
   wb_robot_init();
 
@@ -138,19 +154,8 @@ int main(int argc, char **argv) {
 
   const double *start = wb_supervisor_field_get_sf_vec3f(translation_field);
   printf("СТАРТ: X=%.3f, Y=%.3f, Z=%.3f\n", start[0], start[1], start[2]);
-
-  // УМЕНЬШИЛИ ДИСТАНЦИЮ ПЕРЕД ПОВОРОТОМ (было 2.6, стало 2.2)
-  printf("\n--- Едем к точке 1 ---\n");
-  move_forward(2.2, 0.5); // <-- УМЕНЬШИЛИ РАССТОЯНИЕ
-
-  // ПОВОРОТ НАЛЕВО (положительный угол)
-  printf("\n--- Поворот на 90 град налево ---\n");
-  turn_in_place(90.0, 0.5); // <-- ПОЛОЖИТЕЛЬНЫЙ УГОЛ = НАЛЕВО
-
-  printf("\n--- Едем к точке 2 ---\n");
-  move_forward(2.6, 0.5);
-
-  printf("\n=== ГОТОВО! ===\n");
+  
+  visit_printer();
 
   while (true) step();
   return 0;
